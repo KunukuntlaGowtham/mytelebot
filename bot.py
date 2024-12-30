@@ -37,10 +37,44 @@ def extract_details(url):
 
     return username, title
 
+
 # Check if the user is authenticated
-def is_authenticated(user_id):
-    user_ref = db.collection("users").document(str(user_id))
-    return user_ref.get().exists
+
+from telegram import ChatMember
+
+async def is_member_of_group_and_channel(user_id, group_id, channel_id, context):
+    """
+    Check if a user is a member of a specific group and channel.
+
+    Args:
+        user_id (int): The Telegram user ID.
+        group_id (str): The group username or ID (e.g., "@group_username").
+        channel_id (str): The channel username or ID (e.g., "@channel_username").
+        context (ContextTypes.DEFAULT_TYPE): Telegram context for bot interaction.
+
+    Returns:
+        bool: True if the user is a member of both the group and the channel; False otherwise.
+    """
+    try:
+        # Check group membership
+        group_member = await context.bot.get_chat_member(group_id, user_id)
+        if group_member.status not in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]:
+            return False
+
+        # Check channel membership
+        channel_member = await context.bot.get_chat_member(channel_id, user_id)
+        if channel_member.status not in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]:
+            return False
+
+        return True
+    except Exception as e:
+        # Log the error if needed (optional)
+        print(f"Error checking membership: {e}")
+        return False
+
+# def is_authenticated(user_id):
+#     user_ref = db.collection("users").document(str(user_id))
+#     return user_ref.get().exists
 
 # Deduct credits from a user
 def deduct_credit(user_id, reader_count):
@@ -77,31 +111,65 @@ def add_article(user_id, username, link, read_count):
     })
 
 # Get the next article from the queue
+# Get the next article from the queue
+# Get the next article from the queue
+# Get the next article from the queue
 def get_next_article(user_id):
-    # Query for articles that are unread and not yet read by the requesting user
+    # Fetch the list of titles already read by the user
+    read_articles_ref = db.collection("read_articles").document(str(user_id))
+    read_titles = read_articles_ref.get().to_dict().get("titles", []) if read_articles_ref.get().exists else []
+
+    # Query for articles that are unread
     articles_ref = db.collection("articles").where("read", "==", False).order_by("timestamp")
     docs = articles_ref.stream()
 
     for doc in docs:
         article = doc.to_dict()
-        # Check if the article is not submitted by the requesting user and hasn't been read by them
-        if article["user_id"] != user_id and user_id not in article.get("read_by", []):
-            return doc.id, article
+        article_id = doc.id
+
+        # Skip articles submitted by the user
+        if article["user_id"] == user_id:
+            continue
+
+        # Extract the title from the article link
+        _, title = extract_details(article["article_link"])
+
+        # Skip if the title is already in the user's read list
+        if title in read_titles:
+            continue
+
+        return article_id, article
 
     return None, None
 
 
+
+
 # Mark an article as read
 # Mark an article as read
-def mark_article_as_read(article_id, user_id):
+# Mark an article as read
+# Mark an article as read
+def mark_article_as_read(article_id, user_id, title):
     article_ref = db.collection("articles").document(article_id)
     article = article_ref.get().to_dict()
 
-    # Update the list of readers
-    read_by = article.get("read_by", [])
-    read_by.append(user_id)
+    # Add the title to the user's read_articles collection
+    read_articles_ref = db.collection("read_articles").document(str(user_id))
+    read_articles_doc = read_articles_ref.get()
 
-    # Check if the article should be marked as fully read
+    if read_articles_doc.exists:
+        read_articles = read_articles_doc.to_dict().get("titles", [])
+        if title not in read_articles:
+            read_articles.append(title)
+            read_articles_ref.update({"titles": read_articles})
+    else:
+        read_articles_ref.set({"titles": [title]})
+
+    # Update the article's read_by field
+    read_by = article.get("read_by", [])
+    read_by.append({"user_id": user_id, "title": title})
+
+    # Mark the article as fully read if read_count is reached
     if len(read_by) >= article["read_count"]:
         article_ref.update({"read": True, "read_by": read_by})
     else:
@@ -112,6 +180,17 @@ def mark_article_as_read(article_id, user_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     username = update.message.from_user.username
+    group_id = "@mediumearninggrp"  # Replace with your group ID or username
+    channel_id = "@mediumearningcha"    # Replace with your channel ID or username
+
+    # Check if the user is a member of the group and channel
+    if not await is_member_of_group_and_channel(user_id, group_id, channel_id, context):
+        await update.message.reply_text(
+            f"Please join the required group and channel before using this bot:\n"
+            f"Group: {group_id}\n"
+            f"Channel: {channel_id}"
+        )
+        return
 
     initialize_user(user_id, username)
     credits = get_user_credits(user_id)
@@ -121,10 +200,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
-    if not is_authenticated(user_id):
-        await update.message.reply_text("You need to authenticate first. Please start by typing /start.")
-        return
+    group_id = "@mediumearninggrp"  # Replace with your group ID or username
+    channel_id = "@mediumearningcha"    # Replace with your channel ID or username
 
+    # Check if the user is a member of the group and channel
+    if not await is_member_of_group_and_channel(user_id, group_id, channel_id, context):
+        await update.message.reply_text(
+            f"Please join the required group and channel before using this bot:\n"
+            f"Group: {group_id}\n"
+            f"Channel: {channel_id}"
+        )
+        return
+    
     credits = get_user_credits(user_id)
     await update.message.reply_text(f"Your current balance is {credits} credits.")
 
@@ -132,11 +219,17 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     username = update.message.from_user.username
+    group_id = "@mediumearninggrp"  # Replace with your group ID or username
+    channel_id = "@mediumearningcha"   # Replace with your channel ID or username
 
-    if not is_authenticated(user_id):
-        await update.message.reply_text("You need to authenticate first. Please start by typing /start.")
+    # Check if the user is a member of the group and channel
+    if not await is_member_of_group_and_channel(user_id, group_id, channel_id, context):
+        await update.message.reply_text(
+            f"Please join the required group and channel before using this bot:\n"
+            f"Group: {group_id}\n"
+            f"Channel: {channel_id}"
+        )
         return
-
     credits = get_user_credits(user_id)
     if credits <= 0:
         await update.message.reply_text("You do not have enough credits to submit an article. Earn more credits by reading articles.")
@@ -167,33 +260,62 @@ async def submit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Error deducting credits. Please try again.")
 
 
+# Command: /next# Command: /next
+
+ # Command: /next
 # Command: /next
 async def next_article(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    username = update.message.from_user.username
+    reader_username = update.message.from_user.username
 
     if user_id in pending_proof_users:
         await update.message.reply_text("You must submit a video proof before proceeding.")
         return
 
-    if not is_authenticated(user_id):
-        await update.message.reply_text("You need to authenticate first. Please start by typing /start.")
+    group_id = "@mediumearninggrp"  # Replace with your group ID or username
+    channel_id = "@mediumearningcha"   # Replace with your channel ID or username
+
+    # Check if the user is a member of the group and channel
+    if not await is_member_of_group_and_channel(user_id, group_id, channel_id, context):
+        await update.message.reply_text(
+            f"Please join the required group and channel before using this bot:\n"
+            f"Group: {group_id}\n"
+            f"Channel: {channel_id}"
+        )
         return
 
     article_id, article = get_next_article(user_id)
     if article:
-        mark_article_as_read(article_id, user_id)
-        pending_proof_users[user_id] = {"article_id": article_id, "owner_id": article["user_id"]}
-
         extracted_username, title = extract_details(article['article_link'])
 
+        # Notify the owner of the article
+        owner_id = article["user_id"]
+        owner_ref = db.collection("users").document(str(owner_id))
+        owner = owner_ref.get().to_dict()
+
+        if owner:
+            owner_username = owner.get("username", "Unknown")
+            await context.bot.send_message(
+                chat_id=owner_id,
+                text=(
+                    f"Hello {owner_username},\n"
+                    f"Your article '{title}' is being read by @{reader_username}. They will upload proof after reading."
+                ),
+            )
+
+        # Mark the article as read for the reader
+        mark_article_as_read(article_id, user_id, title)
+        pending_proof_users[user_id] = {"article_id": article_id, "owner_id": owner_id}
+
         await update.message.reply_text(
-            f"username: {extracted_username} \n"
+            f"Username: {extracted_username} \n"
             f"Title: {title}\n"
             "Please upload a video proof after reading."
         )
     else:
         await update.message.reply_text("No articles available in the queue.")
+
+
 
 # Handler for video proof
 async def handle_video_proof(update: Update, context: ContextTypes.DEFAULT_TYPE):
